@@ -1,0 +1,139 @@
+---
+- name            : Install DOCKER AND CONTAINER ZABBIX
+  hosts           : "{{srv}}"
+  become          : yes
+  gather_facts    : no
+
+  vars:
+    mysql_db         : zabbix
+    mysql_user       : zabbix
+    mysql_pass       : "123456789"
+    mysql_root_pass  : "123456789"
+    subnet           : 172.24.1.0/24
+    volume_db        : /etc/mysql
+    volume_zabbix    : /etc/zabbix
+  
+  tasks:
+  - name: Update apt-get repo and cache
+    apt: update_cache=yes force_apt_get=yes cache_valid_time=3600
+
+  - name: Install aptitude
+    apt:
+      name: aptitude
+      state: latest
+      update_cache: true
+
+  - name: Install required system packages
+    apt:
+      pkg: 
+        - apt-transport-https
+        - ca-certificates
+        - software-properties-common
+        - python3-pip
+        - virtualenv
+        - python3-setuptools
+      state: latest
+      update_cache: true
+
+  - name: Add Docker GPG apt Key
+    apt_key:
+      url: https://download.docker.com/linux/ubuntu/gpg
+      state: present
+
+  - name: Add Docker Repository
+    apt_repository:
+      repo: deb https://download.docker.com/linux/ubuntu focal stable
+      state: present
+
+  - name: Update apt and install docker-ce
+    apt:
+      name: docker-ce
+      state: latest
+      update_cache: true
+
+  - name: Install Docker Module for Python
+    pip:
+      name: docker
+
+  - name: Create Folders 
+    file:
+      path: "{{item}}"
+      state: directory
+      mode: 0777
+    with_items:
+      - "{{volume_db}}"
+      - "{{volume_zabbix}}" 
+
+  - name: Create docker Network for Zabbix
+    community.docker.docker_network:
+      name: zabbix-net
+      ipam_config:
+        - subnet: "{{ subnet  }}"
+      state: present
+
+  - name: Run mysql-server container
+    docker_container:
+      name: mysql-server
+      env:
+        MYSQL_DATABASE: "{{mysql_db}}"
+        MYSQL_USER: "{{mysql_user}}"
+        MYSQL_PASSWORD: "{{mysql_pass}}"
+        MYSQL_ROOT_PASSWORD: "{{mysql_root_pass}}"
+      command: [
+                "--character-set-server=utf8",
+                "--collation-server=utf8_bin",
+                "--default-authentication-plugin=mysql_native_password"
+               ]
+      networks:
+        - name: zabbix-net
+      volumes:
+        - "{{volume_db}}:/var/lib/mysql:rw"
+      restart_policy: "unless-stopped"
+      image: mysql:8.0    
+    
+  - name: Run zabbix-java-gateway
+    docker_container:
+      name: zabbix-java-gateway
+      networks: 
+        - name: zabbix-net
+      restart_policy: "unless-stopped"
+      image: zabbix/zabbix-java-gateway:alpine-6.2-latest    
+
+  - name: Run zabbix backend
+    docker_container:
+      name: zabbix-server-mysql
+      env:
+        DB_SERVER_HOST: "mysql-server"
+        MYSQL_DATABASE: "{{mysql_db}}"
+        MYSQL_USER: "{{mysql_user}}"
+        MYSQL_PASSWORD: "{{mysql_pass}}"
+        MYSQL_ROOT_PASSWORD: "{{mysql_root_pass}}"
+        ZBX_JAVAGATEWAY: "zabbix-java-gateway"
+      networks:
+        - name: zabbix-net
+      ports:
+        - "10051:10051/tcp"      
+      restart_policy: "unless-stopped"
+      volumes:
+        - "{{volume_zabbix}}/export:/var/lib/zabbix/export:rw"
+        - "{{volume_zabbix}}/snmptraps:/var/lib/zabbix/snmptraps:rw"
+      image: zabbix/zabbix-server-mysql:alpine-6.2-latest   
+  
+  - name: Run zabbix Frontend
+    docker_container:
+      name: zabbix-web-nginx-mysql
+      env:
+        ZBX_SERVER_HOST: zabbix-server-mysql
+        DB_SERVER_HOST: mysql-server
+        MYSQL_DATABASE: "{{mysql_db}}"
+        MYSQL_USER: "{{mysql_user}}"
+        MYSQL_PASSWORD: "{{mysql_pass}}" 
+        MYSQL_ROOT_PASSWORD: "{{mysql_root_pass}}"
+      networks:
+        - name: zabbix-net
+      ports:
+        - "8080:8080/tcp"
+      restart_policy: "unless-stopped"
+      image: zabbix/zabbix-web-nginx-mysql:alpine-6.2-latest
+
+
